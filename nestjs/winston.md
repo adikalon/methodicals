@@ -7,7 +7,8 @@
 * [Настройка](#settings)
 * [Использование](#usage)
 * [Winston как логгер по умолчанию](#default)
-* [Обработка исключений](#exceptions)
+* [Логирование необработанных исключений](#exceptions)
+* [Логирование отклоненных промисов](#rejects)
 
 ### Используемые пакеты <a name="packages"></a>
 * [winston](https://www.npmjs.com/package/winston)
@@ -98,7 +99,7 @@ async function bootstrap() {
 
 bootstrap();
 ```
-### Обработка исключений <a name="exceptions"></a>
+### Логирование необработанных исключений <a name="exceptions"></a>
 Также можно залогировать все, не обработанные, исключения. Для этого необходимо создать фильтр. Для примера, в папке `src` создадим файл `log-exception.filter.ts` со следующим содержанием:
 ```ts
 import { Catch, HttpException, Inject } from '@nestjs/common';
@@ -169,4 +170,85 @@ import { LogExceptionsFilter } from './log-exception.filter';
   ],
 })
 export class AppModule {}
+```
+
+### Логирование отклоненных промисов <a name="rejects"></a>
+Мы можем залогировать все необработанные отклонения промисов. Для примера создадим файл `log-reject.middleware.ts` в корне папки `src` с таким содержимым:
+```ts
+import { Injectable, NestMiddleware, Inject } from '@nestjs/common';
+import { Request, Response } from 'express';
+import { WINSTON_MODULE_PROVIDER } from 'nest-winston';
+import { Logger } from 'winston';
+
+@Injectable()
+export class LogRejectMiddleware implements NestMiddleware {
+  constructor(
+    @Inject(WINSTON_MODULE_PROVIDER)
+    private readonly logger: Logger
+  ) {}
+
+  use(req: Request, res: Response, next: () => void) {
+    process.on('unhandledRejection', reason => {
+      this.logger.error(reason instanceof Error ? reason.stack : reason);
+    });
+
+    next();
+  }
+}
+```
+
+И в главном модуле (`app.module.ts`) зарегистрируем созданный нами посредник. При этом класс `AppModule` должен реализовать интерфейс `NestModule`. Главный модуль, в результате, может выглядеть например так:
+```ts
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
+import { APP_FILTER } from '@nestjs/core';
+import { join } from 'path';
+import * as winston from 'winston';
+import { WinstonModule } from 'nest-winston';
+import WinstonDailyRotateFile = require('winston-daily-rotate-file');
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { LogExceptionsFilter } from './log-exception.filter';
+import { LogRejectMiddleware } from './log-reject.middleware';
+
+@Module({
+  imports: [
+    /**
+     * Winston
+     */
+    WinstonModule.forRoot({
+      format: winston.format.combine(
+        winston.format.simple(),
+        winston.format.timestamp(),
+        winston.format.printf(info => {
+          const date = info.timestamp.replace(/^.+T(.+)Z$/, '$1');
+          const message = (info.trace || info.message || info).toString().replace(/ {4}/g, '  ');
+          return `[${date}]\n[${info.level}]: ${message}\n`;
+        })
+      ),
+      transports: [
+        new WinstonDailyRotateFile({
+          filename: join(__dirname, '..', 'logs', '%DATE%.log'),
+          datePattern: 'YYYY-MM-DD',
+          maxSize: '10m',
+          level: 'debug',
+        })
+      ]
+    }),
+  ],
+  controllers: [AppController],
+  providers: [
+    {
+      provide: APP_FILTER,
+      useClass: LogExceptionsFilter,
+    },
+    AppService,
+  ],
+})
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer
+      .apply(LogRejectMiddleware)
+      .forRoutes('*');
+  }
+}
 ```
